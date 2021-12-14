@@ -1392,6 +1392,12 @@ func (v *Viper) registerAlias(alias string, key string) {
 				delete(v.override, alias)
 				v.override[key] = val
 			}
+
+			// if we alias an environment variable, we need to add the alias to
+			// the env list in order to search for it later.
+			if _, ok := v.env[key]; ok {
+				v.env[key] = append(v.env[key], v.mergeWithEnvPrefix(alias))
+			}
 			v.aliases[alias] = key
 		}
 	} else {
