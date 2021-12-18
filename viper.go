@@ -252,6 +252,7 @@ type Viper struct {
 	pflags         map[string]FlagValue
 	env            map[string][]string
 	aliases        map[string]string
+	aliases_for    map[string][]string
 	typeByDefValue bool
 
 	// Store read properties on the object so that we can write back in order with comments.
@@ -277,6 +278,7 @@ func New() *Viper {
 	v.pflags = make(map[string]FlagValue)
 	v.env = make(map[string][]string)
 	v.aliases = make(map[string]string)
+	v.aliases_for = make(map[string][]string)
 	v.typeByDefValue = false
 	v.logger = jwwLogger{}
 
@@ -1043,7 +1045,7 @@ func (v *Viper) Unmarshal(rawVal interface{}, opts ...DecoderConfigOption) error
 	return decode(v.AllSettings(), defaultDecoderConfig(rawVal, opts...))
 }
 
-// defaultDecoderConfig returns default mapsstructure.DecoderConfig with suppot
+// defaultDecoderConfig returns default mapstructure.DecoderConfig with support
 // of time.Duration values & string slices
 func defaultDecoderConfig(output interface{}, opts ...DecoderConfigOption) *mapstructure.DecoderConfig {
 	c := &mapstructure.DecoderConfig{
@@ -1224,7 +1226,16 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 		// check any Get request
 		if val, ok := v.getEnv(v.mergeWithEnvPrefix(lcaseKey)); ok {
 			return val
+
+		// check for aliases too
+		if aliases, exists := v.aliases_for[lcaseKey]; exists {
+			for _, alias := range aliases {
+				if val, ok := v.getEnv(v.mergeWithEnvPrefix(alias)); ok {
+					return val
+				}
+			}
 		}
+
 		if nested && v.isPathShadowedInAutoEnv(path) != "" {
 			return nil
 		}
@@ -1393,12 +1404,14 @@ func (v *Viper) registerAlias(alias string, key string) {
 				v.override[key] = val
 			}
 
-			// if we alias an environment variable, we need to add the alias to
+			// if we alias a bound environment variable, we need to add the alias to
 			// the env list in order to search for it later.
 			if _, ok := v.env[key]; ok {
 				v.env[key] = append(v.env[key], v.mergeWithEnvPrefix(alias))
 			}
+
 			v.aliases[alias] = key
+			v.aliases_for[key] = append(v.aliases_for[key], alias)
 		}
 	} else {
 		v.logger.Warn("creating circular reference alias", "alias", alias, "key", key, "real_key", v.realKey(key))
