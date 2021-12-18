@@ -196,16 +196,16 @@ func DecodeHook(hook mapstructure.DecodeHookFunc) DecoderConfigOption {
 // For example, if values from the following sources were loaded:
 //
 //  Defaults : {
-//  	"secret": "",
-//  	"user": "default",
-//  	"endpoint": "https://localhost"
+//	"secret": "",
+//	"user": "default",
+//	"endpoint": "https://localhost"
 //  }
 //  Config : {
-//  	"user": "root"
-//  	"secret": "defaultsecret"
+//	"user": "root"
+//	"secret": "defaultsecret"
 //  }
 //  Env : {
-//  	"secret": "somesecretkey"
+//	"secret": "somesecretkey"
 //  }
 //
 // The resulting config will have the following values:
@@ -281,6 +281,7 @@ func New() *Viper {
 	v.aliases_for = make(map[string][]string)
 	v.typeByDefValue = false
 	v.logger = jwwLogger{}
+	v.logger.SetDebug()
 
 	return v
 }
@@ -506,6 +507,7 @@ func (v *Viper) getEnv(key string) (string, bool) {
 		key = v.envKeyReplacer.Replace(key)
 	}
 
+	//	v.logger.Debug("getenv", "key", key)
 	val, ok := os.LookupEnv(key)
 
 	return val, ok && (v.allowEmptyEnv || val != "")
@@ -841,11 +843,16 @@ func GetViper() *Viper {
 func Get(key string) interface{} { return v.Get(key) }
 
 func (v *Viper) Get(key string) interface{} {
+	if key == "port" || key == "api_port" {
+		v.logger.Debug("get called", "key", key)
+	}
 	lcaseKey := strings.ToLower(key)
 	val := v.find(lcaseKey, true)
 	if val == nil {
+		v.logger.Debug("Get: not found", "key", key, "val", val)
 		return nil
 	}
+	//v.logger.Debug("Get:", "val", val)
 
 	if v.typeByDefValue {
 		// TODO(bep) this branch isn't covered by a single test.
@@ -884,6 +891,7 @@ func (v *Viper) Get(key string) interface{} {
 		}
 	}
 
+	//v.logger.Debug("Get returning", "val", val)
 	return val
 }
 
@@ -1072,6 +1080,46 @@ func decode(input interface{}, config *mapstructure.DecoderConfig) error {
 	return decoder.Decode(input)
 }
 
+func EnvFromStruct(s interface{}) error { return v.envFromStruct(s) }
+
+func (v *Viper) envFromStruct(s interface{}) error {
+	c := &mapstructure.DecoderConfig{
+		Metadata:         &mapstructure.Metadata{},
+		Result:           s,
+		WeaklyTypedInput: true,
+		Introspect:       true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(c)
+	if err != nil {
+		return err
+	}
+	if err := decoder.Decode((map[string]interface{})(nil)); err != nil {
+		return err
+	}
+
+	v.logger.Error("instrospected", "metadata.Fields", c.Metadata.Fields)
+	for field, kind := range c.Metadata.Fields {
+		log.Printf("%v=%v", field, kind)
+		if kind != reflect.Struct {
+			log.Printf("envFromStruct: registering environment for %v", field)
+			if v.envKeyReplacer != nil {
+				v.BindEnv(field, v.mergeWithEnvPrefix(v.envKeyReplacer.Replace(field)))
+			} else {
+				v.BindEnv(field)
+			}
+		} else {
+			log.Printf("envFromStruct: Skipping %v=%v", field, kind)
+		}
+
+	}
+	//v.logger.Error("instrospected", "metadata.keys", c.Metadata.Keys)
+	return nil
+}
+
 // UnmarshalExact unmarshals the config into a Struct, erroring if a field is nonexistent
 // in the destination struct.
 func UnmarshalExact(rawVal interface{}, opts ...DecoderConfigOption) error {
@@ -1171,15 +1219,21 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 		exists bool
 		path   = strings.Split(lcaseKey, v.keyDelim)
 		nested = len(path) > 1
+		// origKey string
 	)
+
+	//v.logger.Debug("searching", lcaseKey, flagDefault)
 
 	// compute the path through the nested maps to the nested value
 	if nested && v.isPathShadowedInDeepMap(path, castMapStringToMapInterface(v.aliases)) != "" {
 		return nil
 	}
 
+	// save original key, needed later in case of aliased environment variable
+	// origKey = lcaseKey
 	// if the requested key is an alias, then return the proper key
 	lcaseKey = v.realKey(lcaseKey)
+	//v.logger.Debug("lcase after realkey", lcaseKey)
 	path = strings.Split(lcaseKey, v.keyDelim)
 	nested = len(path) > 1
 
@@ -1225,7 +1279,11 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 		// even if it hasn't been registered, if automaticEnv is used,
 		// check any Get request
 		if val, ok := v.getEnv(v.mergeWithEnvPrefix(lcaseKey)); ok {
+			v.logger.Debug("automaticEnv lcaseKey")
 			return val
+		} else {
+			v.logger.Debug("didn't find value in env for", "lcaseKey", lcaseKey, "merged", v.mergeWithEnvPrefix(lcaseKey))
+		}
 
 		// check for aliases too
 		if aliases, exists := v.aliases_for[lcaseKey]; exists {
@@ -1237,9 +1295,11 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 		}
 
 		if nested && v.isPathShadowedInAutoEnv(path) != "" {
+			//v.logger.Debug("wat")
 			return nil
 		}
 	}
+
 	envkeys, exists := v.env[lcaseKey]
 	if exists {
 		for _, envkey := range envkeys {
@@ -1248,6 +1308,7 @@ func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
 			}
 		}
 	}
+
 	if nested && v.isPathShadowedInFlatMap(path, v.env) != "" {
 		return nil
 	}
@@ -1379,6 +1440,8 @@ func (v *Viper) RegisterAlias(alias string, key string) {
 }
 
 func (v *Viper) registerAlias(alias string, key string) {
+	// v.logger.Debug("alias", alias)
+	// v.logger.Debug("key", key)
 	alias = strings.ToLower(alias)
 	if alias != key && alias != v.realKey(key) {
 		_, exists := v.aliases[alias]
@@ -1791,6 +1854,7 @@ func castToMapStringInterface(
 func castMapStringSliceToMapInterface(src map[string][]string) map[string]interface{} {
 	tgt := map[string]interface{}{}
 	for k, v := range src {
+		//log.Printf("k=%v, v=%v", k, v)
 		tgt[k] = v
 	}
 	return tgt
@@ -1976,19 +2040,28 @@ func AllKeys() []string { return v.AllKeys() }
 func (v *Viper) AllKeys() []string {
 	m := map[string]bool{}
 	// add all paths, by order of descending priority to ensure correct shadowing
+	v.logger.Debug("allkeys0", "m", m)
 	m = v.flattenAndMergeMap(m, castMapStringToMapInterface(v.aliases), "")
+	v.logger.Debug("allkeys1", "added", castMapStringToMapInterface(v.aliases))
 	m = v.flattenAndMergeMap(m, v.override, "")
+	v.logger.Debug("allkeys2", "added", v.override)
 	m = v.mergeFlatMap(m, castMapFlagToMapInterface(v.pflags))
+	v.logger.Debug("allkeys3", "castMapFlag", castMapFlagToMapInterface(v.pflags))
 	m = v.mergeFlatMap(m, castMapStringSliceToMapInterface(v.env))
+	v.logger.Debug("allkeys4", "castMapString", castMapStringSliceToMapInterface(v.env))
 	m = v.flattenAndMergeMap(m, v.config, "")
+	v.logger.Debug("allkeys5", "config", v.config)
 	m = v.flattenAndMergeMap(m, v.kvstore, "")
+	v.logger.Debug("allkeys6", "kvstore", v.kvstore)
 	m = v.flattenAndMergeMap(m, v.defaults, "")
+	v.logger.Debug("allkeys7", "defaults", v.defaults)
 
 	// convert set of paths to list
 	a := make([]string, 0, len(m))
 	for x := range m {
 		a = append(a, x)
 	}
+	log.Printf("final=%v", m)
 	return a
 }
 
@@ -2058,6 +2131,7 @@ func (v *Viper) AllSettings() map[string]interface{} {
 	m := map[string]interface{}{}
 	// start from the list of keys, and construct the map one value at a time
 	for _, k := range v.AllKeys() {
+
 		value := v.Get(k)
 		if value == nil {
 			// should not happen, since AllKeys() returns only keys holding a value,
@@ -2151,6 +2225,7 @@ func Debug() { v.Debug() }
 
 func (v *Viper) Debug() {
 	fmt.Printf("Aliases:\n%#v\n", v.aliases)
+	fmt.Printf("Aliased:\n%#v\n", v.aliases)
 	fmt.Printf("Override:\n%#v\n", v.override)
 	fmt.Printf("PFlags:\n%#v\n", v.pflags)
 	fmt.Printf("Env:\n%#v\n", v.env)
