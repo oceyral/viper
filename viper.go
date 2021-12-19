@@ -253,6 +253,7 @@ type Viper struct {
 	env            map[string][]string
 	aliases        map[string]string
 	aliases_for    map[string][]string
+	ms_metadata    *mapstructure.Metadata
 	typeByDefValue bool
 
 	// Store read properties on the object so that we can write back in order with comments.
@@ -279,6 +280,7 @@ func New() *Viper {
 	v.env = make(map[string][]string)
 	v.aliases = make(map[string]string)
 	v.aliases_for = make(map[string][]string)
+	v.ms_metadata = nil
 	v.typeByDefValue = false
 	v.logger = jwwLogger{}
 	v.logger.SetDebug()
@@ -1080,12 +1082,20 @@ func decode(input interface{}, config *mapstructure.DecoderConfig) error {
 	return decoder.Decode(input)
 }
 
-func EnvFromStruct(s interface{}) error { return v.envFromStruct(s) }
+// should be a mapstructure function ?
+func (v *Viper) introspect(s interface{}) error {
+	// here, create a copy of our interface on which
+	// to introspect, since we use an empty map, so mapstructure
+	// will zero all fields
+	val := reflect.ValueOf(s)
+	if val.Kind() == reflect.Ptr {
+		val = reflect.Indirect(val)
+	}
+	copy := reflect.New(val.Type()).Interface()
 
-func (v *Viper) envFromStruct(s interface{}) error {
 	c := &mapstructure.DecoderConfig{
 		Metadata:         &mapstructure.Metadata{},
-		Result:           s,
+		Result:           copy,
 		WeaklyTypedInput: true,
 		Introspect:       true,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
@@ -1100,25 +1110,43 @@ func (v *Viper) envFromStruct(s interface{}) error {
 	if err := decoder.Decode((map[string]interface{})(nil)); err != nil {
 		return err
 	}
+	v.ms_metadata = c.Metadata
+	return nil
+}
 
-	v.logger.Error("instrospected", "metadata.Fields", c.Metadata.Fields)
-	for field, kind := range c.Metadata.Fields {
-		log.Printf("%v=%v", field, kind)
-		if kind != reflect.Struct {
-			log.Printf("envFromStruct: registering environment for %v", field)
-			if v.envKeyReplacer != nil {
-				v.BindEnv(field, v.mergeWithEnvPrefix(v.envKeyReplacer.Replace(field)))
+func EnvFromStruct(s interface{}) error { return v.envFromStruct(s) }
+
+func (v *Viper) envFromStruct(s interface{}) error {
+	if v.ms_metadata == nil {
+		// make a copy of our object
+		v.introspect(s)
+	}
+
+	for name, field := range v.ms_metadata.Fields {
+		//log.Printf("%v=%v", field, field.Tag.Get("mapstructure"))
+		if field.Type.Kind() != reflect.Struct {
+			//log.Printf("envFromStruct: registering environment for %v", field)
+			if v.envKeyReplacer != nil { // TODO do i need to call envkeyreplacer here ?
+				v.BindEnv(name, v.mergeWithEnvPrefix(v.envKeyReplacer.Replace(name)))
 			} else {
-				v.BindEnv(field)
+				v.BindEnv(name)
 			}
-		} else {
-			log.Printf("envFromStruct: Skipping %v=%v", field, kind)
-		}
+		} //  else {
+		//	log.Printf("envFromStruct: Skipping %v=%v", field, kind)
+		// }
 
 	}
 	//v.logger.Error("instrospected", "metadata.keys", c.Metadata.Keys)
 	return nil
 }
+
+// flagsFromStruct ...
+// func (v *Viper) flagsFromStruct(s interface{}) error {
+//	if v.ms_metadata == nil {
+//		v.introspect(s)
+//	}
+
+// }
 
 // UnmarshalExact unmarshals the config into a Struct, erroring if a field is nonexistent
 // in the destination struct.
